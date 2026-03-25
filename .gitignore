@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.bin
+*.tmp
+.env
+bot/ecosystem.config.js

@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0d1117;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#161b22;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="text-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#ff6b6b" />
+      <stop offset="50%" style="stop-color:#ffd93d" />
+      <stop offset="100%" style="stop-color:#6bcb77" />
+    </linearGradient>
+    <linearGradient id="skull" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#ff4444" />
+      <stop offset="100%" style="stop-color:#cc0000" />
+    </linearGradient>
+  </defs>
+  <rect width="800" height="200" rx="16" fill="url(#bg)"/>
+  <text x="120" y="125" font-family="monospace" font-size="72" font-weight="bold" fill="url(#text-grad)">XBADB00B</text>
+  <text x="120" y="165" font-family="monospace" font-size="20" fill="#8b949e">Frida QuickJS Bytecode Decompiler</text>
+  <text x="60" y="130" font-size="80">💀</text>
+</svg>
