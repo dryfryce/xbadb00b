@@ -494,11 +494,11 @@ def parse_file(data):
             cvn_raw, pos = read_leb128(data, pos)
             cvn = resolve_bc_atom_leb(atoms, cvn_raw)
             cv_idx, pos = read_leb128(data, pos)
-            # Frida uses u8 for closure var flags, Bellard/NG use u16
-            if vcfg and vcfg.name.startswith('frida'):
-                cv_flags = data[pos]; pos += 1
-            else:
+            # Frida + NG use u8 for closure var flags, Bellard v1/v5 use u16
+            if vcfg and (vcfg.name.startswith('bellard')):
                 cv_flags = data[pos] | (data[pos+1] << 8); pos += 2
+            else:
+                cv_flags = data[pos]; pos += 1
             is_local = cv_flags & 1
             is_arg = (cv_flags >> 1) & 1
             closure_names[i] = cvn
@@ -517,10 +517,31 @@ def parse_file(data):
         if has_debug:
             dbg_fn_raw, pos = read_leb128(data, pos)
             dbg_filename = resolve_bc_atom_leb(atoms, dbg_fn_raw)
-            dbg_line, pos = read_leb128(data, pos)
-            pc2line_len, pos = read_leb128(data, pos)
-            pos += pc2line_len
-            out.append(f"  debug: file={dbg_filename} line={dbg_line} pc2line={pc2line_len}b")
+            
+            if vcfg and vcfg.name.startswith('frida'):
+                # Frida: filename, line_num, pc2line_len, pc2line_data
+                dbg_line, pos = read_leb128(data, pos)
+                pc2line_len, pos = read_leb128(data, pos)
+                pos += pc2line_len
+                out.append(f"  debug: file={dbg_filename} line={dbg_line} pc2line={pc2line_len}b")
+            elif vcfg and vcfg.name.startswith('ng'):
+                # QuickJS-NG: filename, line_num, pc2line_len, pc2line_data (no source)
+                dbg_line, pos = read_leb128(data, pos)
+                pc2line_len, pos = read_leb128(data, pos)
+                pos += pc2line_len
+                out.append(f"  debug: file={dbg_filename} line={dbg_line} pc2line={pc2line_len}b")
+            else:
+                # Bellard v1/v5: filename, pc2line_len, pc2line_data, source_len, source_data
+                pc2line_len, pos = read_leb128(data, pos)
+                pos += pc2line_len
+                source_len, pos = read_leb128(data, pos)
+                if source_len > 0:
+                    source_text = data[pos:pos+source_len].decode('utf-8', errors='replace')
+                    pos += source_len
+                    out.append(f"  debug: file={dbg_filename} pc2line={pc2line_len}b source={source_len}b")
+                    out.append(f"  EMBEDDED SOURCE: {source_text[:200]}{'...' if source_len > 200 else ''}")
+                else:
+                    out.append(f"  debug: file={dbg_filename} pc2line={pc2line_len}b")
 
         # Build separate arg/loc/ref name maps
         # vardefs layout: [arg0, arg1, ..., argN-1, var0, var1, ..., varM-1]
@@ -559,19 +580,49 @@ def parse_file(data):
             # (only the ones that are 0x0E tags)
             parsed_functions[-1]['child_start'] = child_start
 
-        # Cpool (child functions)
+        # Cpool: count child functions, skip constant entries
+        # Functions (bc_tag_func) are parsed by the main while loop.
+        # Constants (strings, ints, etc.) must be skipped here.
+        # Order matters: we must process them in cpool order.
         child_func_count = 0
+        cpool_func_indices = []  # which cpool indices are functions
         for ci in range(cpool_count):
             if pos >= len(data):
                 break
             cp_tag = data[pos]
             if cp_tag == bc_tag_func:
                 child_func_count += 1
-                pass  # parsed in next while loop iteration
+                cpool_func_indices.append(ci)
+                # Don't advance pos — main while loop will parse this function
+                break  # remaining cpool entries are after the child functions
             else:
                 pos = skip_constant(data, pos)
+        
+        # If we found a function, remaining cpool entries (more functions + constants)
+        # will be handled: functions by the main while loop, constants need tracking
+        # For now, assume remaining cpool after first function are all functions
+        # (QuickJS typically puts constants first, then functions in cpool)
+        if child_func_count == 0:
+            # No child functions — all constants were skipped
+            pass
+        else:
+            # Count remaining functions by scanning for bc_tag_func tags
+            # The main while loop will parse them
+            scan_pos = pos
+            remaining_funcs = 0
+            for ci2 in range(ci, cpool_count):
+                if scan_pos >= len(data):
+                    break
+                if data[scan_pos] == bc_tag_func:
+                    remaining_funcs += 1
+                    # Need to skip past this function to count the next
+                    # But we can't easily without parsing... just count tags
+                    # Actually the main while loop handles all sequential functions
+                    pass
+            child_func_count = remaining_funcs if remaining_funcs > 0 else child_func_count
 
         parsed_functions[-1]['child_func_count'] = child_func_count
+        parsed_functions[-1]['cpool_func_indices'] = cpool_func_indices
         func_num += 1
 
     # ── Pass 2: Reconstruct with child function inlining ──
