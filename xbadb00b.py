@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Frida QuickJS Bytecode Decompiler (BC_VERSION=2, CONFIG_BIGNUM)
-Exact format from github.com/frida/quickjs
+XBADB00B — QuickJS Bytecode Decompiler
+Supports: Frida v2, Bellard v1/v5, QuickJS-NG v24, big-endian variants
 
 Format:
-  [u8 version=2] [leb128 atom_count] [atoms...] [u8 BC_TAG=0x0E] [function...]
+  [u8 version] [leb128 atom_count] [atoms...] [u8 BC_TAG] [function...]
 """
 
 import sys, struct
@@ -351,14 +351,43 @@ def resolve_bc_atom(atoms, raw_u32):
 
 
 def parse_file(data):
-    """Parse complete Frida QJS bytecode file"""
+    """Parse QuickJS bytecode file — auto-detects version"""
+    # ── Version detection ──
+    try:
+        from version_tables import get_version_config, VERSION_REGISTRY
+        vcfg = get_version_config(data[0]) if data else None
+    except ImportError:
+        vcfg = None
+
+    # Override atom resolution if we have version config
+    if vcfg is not None:
+        global FIRST_ATOM, BUILTINS, resolve_bc_atom, resolve_bc_atom_leb
+        _vcfg = vcfg
+        FIRST_ATOM = vcfg.first_atom
+        BUILTINS = vcfg.atom_table
+
+        def resolve_bc_atom(atoms, raw_u32):
+            return _vcfg.resolve_atom(atoms, raw_u32)
+
+        def resolve_bc_atom_leb(atoms, raw_leb):
+            return _vcfg.resolve_atom_leb(atoms, raw_leb)
+
+        # Update opcode lookup
+        global OP_MAP
+        OP_MAP = vcfg.opcode_table
+
     pos = 0
     out = []
 
     # ─── Atom table ───
     version = data[pos]; pos += 1
     atom_count, pos = read_leb128(data, pos)
-    out.append(f"BC_VERSION: {version} (Frida QuickJS, CONFIG_BIGNUM)")
+
+    version_names = {1: 'Bellard v1 (no BigNum)', 2: 'Frida v2 (CONFIG_BIGNUM)',
+                     5: 'Bellard v5 (upstream current)', 24: 'QuickJS-NG v24',
+                     0x41: 'Bellard v1 BE', 0x42: 'Frida v2 BE', 0x45: 'Bellard v5 BE'}
+    vname = version_names.get(version, f'Unknown v{version}')
+    out.append(f"BC_VERSION: {version} ({vname})")
     out.append(f"Atom count: {atom_count}\n")
 
     atoms = []
@@ -381,9 +410,10 @@ def parse_file(data):
     func_num = 0
     parsed_functions = []
     current_parent = None
+    bc_tag_func = vcfg.bc_tag_func if vcfg else 0x0E
     while pos < len(data):
         tag = data[pos]
-        if tag != 0x0E:  # BC_TAG_FUNCTION_BYTECODE
+        if tag != bc_tag_func:
             out.append(f"\nUnexpected tag 0x{tag:02x} @ 0x{pos:03x}, stopping")
             break
         pos += 1
@@ -412,11 +442,14 @@ def parse_file(data):
         name_raw, pos = read_leb128(data, pos)
         func_name = resolve_bc_atom_leb(atoms, name_raw)
 
-        # LEB128 fields (NO var_ref_count in Frida's fork!)
+        # LEB128 header fields (layout varies by version)
         arg_count, pos = read_leb128(data, pos)
         var_count, pos = read_leb128(data, pos)
         def_arg_count, pos = read_leb128(data, pos)
         stack_size, pos = read_leb128(data, pos)
+        # Frida v2 has NO var_ref_count; Bellard v5, NG v24 DO have it
+        if vcfg is not None and vcfg.has_var_ref_count:
+            _var_ref_count, pos = read_leb128(data, pos)
         closure_var_count, pos = read_leb128(data, pos)
         cpool_count, pos = read_leb128(data, pos)
         bc_len, pos = read_leb128(data, pos)
@@ -433,9 +466,17 @@ def parse_file(data):
         for i in range(local_count):
             vn_raw, pos = read_leb128(data, pos)
             vn = resolve_bc_atom_leb(atoms, vn_raw)
-            scope_level, pos = read_leb128(data, pos)
-            scope_next, pos = read_leb128(data, pos)
-            scope_next -= 1
+            # Vardef layout differs by version:
+            # Frida v2 + NG v24: scope_level, scope_next
+            # Bellard v1/v5: scope_next, var_ref_idx
+            if vcfg is None or vcfg.vardef_uses_scope_level:
+                # Frida/NG style
+                _scope_level, pos = read_leb128(data, pos)
+                _scope_next, pos = read_leb128(data, pos)
+            else:
+                # Bellard v1/v5 style
+                _scope_next, pos = read_leb128(data, pos)
+                _var_ref_idx, pos = read_leb128(data, pos)
             vflags = data[pos]; pos += 1
             var_kind = vflags & 0xf
             is_const = (vflags >> 4) & 1
@@ -453,7 +494,11 @@ def parse_file(data):
             cvn_raw, pos = read_leb128(data, pos)
             cvn = resolve_bc_atom_leb(atoms, cvn_raw)
             cv_idx, pos = read_leb128(data, pos)
-            cv_flags = data[pos]; pos += 1
+            # Frida uses u8 for closure var flags, Bellard/NG use u16
+            if vcfg and vcfg.name.startswith('frida'):
+                cv_flags = data[pos]; pos += 1
+            else:
+                cv_flags = data[pos] | (data[pos+1] << 8); pos += 2
             is_local = cv_flags & 1
             is_arg = (cv_flags >> 1) & 1
             closure_names[i] = cvn
@@ -489,7 +534,7 @@ def parse_file(data):
 
         # Disassemble
         out.append(f"\n  ── Disassembly ({bc_len} bytes) ──")
-        instrs = disassemble(bc_data, atoms)
+        instrs = disassemble(bc_data, atoms, closure_var_names=closure_names)
         for ins in instrs:
             raw = ' '.join(f'{b:02x}' for b in ins['raw'])
             out.append(f"    {ins['off']:4d} | {raw:<20s} | {ins['name']:<24s} {ins['desc']}")
@@ -520,7 +565,7 @@ def parse_file(data):
             if pos >= len(data):
                 break
             cp_tag = data[pos]
-            if cp_tag == 0x0E:
+            if cp_tag == bc_tag_func:
                 child_func_count += 1
                 pass  # parsed in next while loop iteration
             else:
@@ -642,18 +687,19 @@ def skip_constant(data, pos):
     return pos
 
 
-def disassemble(bc, atoms):
-    """Disassemble bytecode using Frida's opcode table"""
+def disassemble(bc, atoms, closure_var_names=None):
+    """Disassemble bytecode using the active opcode table.
+    closure_var_names: dict mapping var_ref index → name (for Bellard/NG where get_var uses var_ref format)"""
     instrs = []
     pos = 0
     while pos < len(bc):
         op = bc[pos]
-        if op >= len(FRIDA_OPS):
+        op_entry = OP_MAP.get(op)
+        if op_entry is None:
             instrs.append({'off': pos, 'op': op, 'name': f'db 0x{op:02x}', 'desc': '', 'raw': bc[pos:pos+1]})
             pos += 1
             continue
-
-        name, size, fmt = FRIDA_OPS[op]
+        name, size, fmt = op_entry
         if pos + size > len(bc):
             instrs.append({'off': pos, 'op': op, 'name': f'{name}[trunc]', 'desc': '', 'raw': bc[pos:]})
             break
@@ -674,6 +720,13 @@ def disassemble(bc, atoms):
             elif fmt == "u16":
                 operand = struct.unpack_from('<H', bc, pos+1)[0]
                 desc = str(operand)
+            elif fmt == "var_ref":
+                # In Bellard/NG: var_ref indexes into closure_var table for names
+                operand = struct.unpack_from('<H', bc, pos+1)[0]
+                if closure_var_names and operand in closure_var_names:
+                    desc = closure_var_names[operand]
+                else:
+                    desc = f"var_ref[{operand}]"
             elif fmt == "i16":
                 operand = struct.unpack_from('<h', bc, pos+1)[0]
                 desc = str(operand)

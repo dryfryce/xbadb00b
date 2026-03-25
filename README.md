@@ -10,7 +10,7 @@
 ![Python](assets/badge-python.svg)
 ![License](assets/badge-license.svg)
 
-**Frida QuickJS Bytecode Decompiler**
+**Universal QuickJS Bytecode Decompiler**
 
 *Reverse-engineer compiled Frida agent bytecode back to readable JavaScript*
 
@@ -64,7 +64,7 @@ XBADB00B cracks that protection. **Every variable name, every function call, eve
 
 ```bash
 # Clone the repo
-git clone https://github.com/AXM-IO/xbadb00b.git
+git clone https://github.com/dryfryce/xbadb00b.git
 cd xbadb00b
 
 # No dependencies required — pure Python 3.8+
@@ -211,7 +211,7 @@ Popup script: 15/15 lines ✅ (exact match)
 
 - `var`/`let`/`const` distinction partially lost (bytecode uses `const` for `put_var_init`)
 - Hex integers display as decimal
-- Only supports `BC_VERSION=2` (Frida's QuickJS fork with `CONFIG_BIGNUM`)
+- Supports BC_VERSION 1, 2, 5, 24 + big-endian variants (Frida's QuickJS fork with `CONFIG_BIGNUM`)
 
 ## 🏗️ Supported Format
 
